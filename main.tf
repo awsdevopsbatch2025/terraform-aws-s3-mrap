@@ -1,8 +1,70 @@
 locals {
-  # existing lifecycle rules concatenation as before ...
   effective_lifecycle_rules = concat(
     var.lifecycle_rules,
-    # ... same as your existing local block for lifecycle_rules ...
+    var.noncurrent_object_expiration_days > 0 ?
+    [{
+      expiration                    = { expired_object_delete_marker = true }
+      filter                       = { prefix = "" }
+      id                           = "Expire non-current object versions"
+      noncurrent_version_expiration = { noncurrent_days = var.noncurrent_object_expiration_days }
+      status                       = "Enabled"
+    }] : [],
+    var.incomplete_multipart_expiration_days > 0 ?
+    [{
+      abort_incomplete_multipart_upload_days = var.incomplete_multipart_expiration_days
+      filter                                 = { prefix = "" }
+      id                                     = "Cleanup abandoned multipart uploads"
+      status                                 = "Enabled"
+    }] : [],
+    var.warm_tier_transition_days > 0 ?
+    [{
+      filter     = { object_size_greater_than = var.warm_tier_minimum_size }
+      id         = "Transition objects to warm tier"
+      status     = "Enabled"
+      transition = [{ days = var.warm_tier_transition_days, storage_class = var.warm_tier_storage_class }]
+    }] : [],
+    var.cold_tier_transition_days > 0 ?
+    [{
+      filter     = { object_size_greater_than = var.cold_tier_minimum_size }
+      id         = "Transition objects to cold tier"
+      status     = "Enabled"
+      transition = [{ days = var.cold_tier_transition_days, storage_class = var.cold_tier_storage_class }]
+    }] : [],
+    var.object_expiration_days > 0 ?
+    [{
+      expiration = { days = max(var.object_expiration_days, 1 + (var.warm_tier_transition_days > 0 ? var.warm_tier_transition_days + 30 : 0) + var.cold_tier_transition_days + (var.cold_tier_transition_days > 0 ? (var.cold_tier_storage_class == "GLACIER_IR" ? 90 : 180) : 0)) }
+      filter     = { prefix = "" }
+      id         = "Automatically delete objects in bucket"
+      status     = "Enabled"
+    }] : [],
+    var.temporary_object_expiration_days > 0 ?
+    [{
+      expiration = { days = var.temporary_object_expiration_days }
+      filter     = { prefix = "temporary/" }
+      id         = "Delete objects under temporary/ prefix"
+      status     = "Enabled"
+    }] : [],
+    var.temporary_object_expiration_days > 0 ?
+    [{
+      expiration = { days = var.temporary_object_expiration_days }
+      filter     = { tag = { key = "lifecycle", value = "temporary" } }
+      id         = "Delete objects tagged lifecycle=temporary"
+      status     = "Enabled"
+    }] : [],
+    var.archive_object_transition_days > 0 ?
+    [{
+      filter     = { and = { prefix = "archive/", object_size_greater_than = 131071 } }
+      id         = "Online archive objects under archive/ prefix"
+      status     = "Enabled"
+      transition = [{ days = var.archive_object_transition_days, storage_class = "GLACIER_IR" }]
+    }] : [],
+    var.archive_object_transition_days > 0 ?
+    [{
+      filter     = { and = { tags = { "lifecycle" = "archive" }, object_size_greater_than = 131071 } }
+      id         = "Online archive objects tagged lifecycle=archive"
+      status     = "Enabled"
+      transition = [{ days = var.archive_object_transition_days, storage_class = "GLACIER_IR" }]
+    }] : []
   )
 
   name_suffix  = var.name_uniqueness == true ? "-${random_id.name_suffix[0].hex}" : ""
@@ -161,7 +223,7 @@ resource "aws_s3_bucket_replication_configuration" "this" {
             content {
               status = metrics.value.status
               event_threshold {
-                minutes = metrics.value.event_threshold_minutes
+                minutes = dest.metrics.event_threshold_minutes
               }
             }
           }
@@ -324,7 +386,6 @@ resource "aws_iam_policy" "replication" {
             ]) : []
           )
         },
-        # MRAP permissions added here
         {
           Sid    = "MRAPPermissions"
           Effect = "Allow"
@@ -351,7 +412,6 @@ resource "aws_iam_role_policy_attachment" "replication" {
   policy_arn = aws_iam_policy.replication[0].arn
 }
 
-# MRAP resource
 resource "aws_s3_multi_region_access_point" "this" {
   count = var.mrap_name != null && length(var.mrap_regions) > 0 ? 1 : 0
 
