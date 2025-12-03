@@ -1,13 +1,14 @@
 locals {
+  # append optional standard lifecycle rules to any rules specified by caller
   effective_lifecycle_rules = concat(
     var.lifecycle_rules,
     var.noncurrent_object_expiration_days > 0 ?
     [{
       expiration                    = { expired_object_delete_marker = true }
-      filter                       = { prefix = "" }
-      id                           = "Expire non-current object versions"
+      filter                        = { prefix = "" }
+      id                            = "Expire non-current object versions"
       noncurrent_version_expiration = { noncurrent_days = var.noncurrent_object_expiration_days }
-      status                       = "Enabled"
+      status                        = "Enabled"
     }] : [],
     var.incomplete_multipart_expiration_days > 0 ?
     [{
@@ -69,14 +70,18 @@ locals {
 
   name_suffix  = var.name_uniqueness == true ? "-${random_id.name_suffix[0].hex}" : ""
   applied_name = "${var.name_prefix}${var.name}${local.name_suffix}"
+  # If versioning is disabled (suspended), add backup=exclude tag. AWS backup fails if versioning is not enabled.
   backup_status = var.object_versioning_status == "Suspended" ? { "hh:backup" = "exclude" } : null
+  # If hh:phi tag is explicitely entered as false, add tag, if not default to hh:phi=true
   phi_status = module.label.phi == "false" ? { "hh:phi" = "false" } : { "hh:phi" = "true" }
+  # Combine var.tags for backwards compatability, module.label.tags, and backup tag if needed
   applied_tags = merge(module.label.tags, local.backup_status, local.phi_status, var.tags)
 
+  # Transform replication_configuration for v3 module format (without role, role will be computed in module call)
   replication_configuration_rules = var.replication_configuration != null ? [for rule in var.replication_configuration.rules : {
-    id                             = rule.id
-    status                         = rule.status
-    priority                       = rule.priority
+    id                               = rule.id
+    status                           = rule.status
+    priority                         = rule.priority
     delete_marker_replication_status = rule.delete_marker_replication_status
     destinations = [for dest in rule.destinations : {
       bucket        = dest.bucket_arn
@@ -149,6 +154,7 @@ module "this" {
         kms_master_key_id = var.kms_master_key_id
         sse_algorithm     = var.kms_master_key_id == null ? "AES256" : "aws:kms"
       }
+
       bucket_key_enabled = var.kms_master_key_id == null ? false : true
     }
   }
@@ -223,7 +229,7 @@ resource "aws_s3_bucket_replication_configuration" "this" {
             content {
               status = metrics.value.status
               event_threshold {
-                minutes = dest.metrics.event_threshold_minutes
+                minutes = metrics.value.event_threshold_minutes
               }
             }
           }
@@ -385,18 +391,6 @@ resource "aws_iam_policy" "replication" {
                 ]
             ]) : []
           )
-        },
-        {
-          Sid    = "MRAPPermissions"
-          Effect = "Allow"
-          Action = [
-            "s3:PutMultiRegionAccessPointPolicy",
-            "s3:GetMultiRegionAccessPoint",
-            "s3:DeleteMultiRegionAccessPoint",
-            "s3:UpdateMultiRegionAccessPointPolicy",
-            "s3:ControlMultiRegionAccessPoint"
-          ]
-          Resource = "*"
         }
       ],
       var.replication_iam.additional_policy_statements
@@ -412,25 +406,102 @@ resource "aws_iam_role_policy_attachment" "replication" {
   policy_arn = aws_iam_policy.replication[0].arn
 }
 
-resource "aws_s3_multi_region_access_point" "this" {
+resource "aws_s3control_multi_region_access_point" "this" {
   count = var.mrap_name != null && length(var.mrap_regions) > 0 ? 1 : 0
 
-  name = var.mrap_name
+  details {
+    name = var.mrap_name
 
-  endpoints = [
-    for r in var.mrap_regions : {
-      region = r.region
-      bucket = r.bucket_arn
+    dynamic "region" {
+      for_each = var.mrap_regions
+      content {
+        bucket = region.value.bucket_arn
+      }
     }
-  ]
+  }
 }
 
-output "mrap_arn" {
-  description = "ARN of the Multi-Region Access Point"
-  value       = length(aws_s3_multi_region_access_point.this) > 0 ? aws_s3_multi_region_access_point.this[0].arn : null
+resource "aws_iam_role" "mrap" {
+  count = var.mrap_iam != null ? 1 : 0
+
+  name = var.mrap_iam.role_name
+
+  assume_role_policy = var.mrap_iam.custom_role_trust_policy != null ? var.mrap_iam.custom_role_trust_policy : jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "s3.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = local.applied_tags
 }
 
-output "mrap_alias" {
-  description = "Alias URL of the Multi-Region Access Point"
-  value       = length(aws_s3_multi_region_access_point.this) > 0 ? aws_s3_multi_region_access_point.this[0].alias : null
+resource "aws_iam_policy" "mrap" {
+  count = var.mrap_iam != null ? 1 : 0
+
+  name        = var.mrap_iam.policy_name
+  path        = var.mrap_iam.policy_path
+  description = var.mrap_iam.policy_description
+
+  policy = var.mrap_iam.custom_policy != null ? var.mrap_iam.custom_policy : jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      [
+        {
+          Sid    = "MRAPPermissions"
+          Effect = "Allow"
+          Action = [
+            "s3:GetMultiRegionAccessPoint",
+            "s3:GetMultiRegionAccessPointPolicy",
+            "s3:PutMultiRegionAccessPointPolicy",
+            "s3:DescribeMultiRegionAccessPointOperation",
+            "s3:GetMultiRegionAccessPointRoutes",
+            "s3:ListMultiRegionAccessPoints"
+          ]
+          Resource = var.mrap_iam.mrap_arn != null ? [var.mrap_iam.mrap_arn] : (var.mrap_name != null && length(var.mrap_regions) > 0 ? [aws_s3control_multi_region_access_point.this[0].arn] : [])
+        },
+        {
+          Sid    = "BucketPermissions"
+          Effect = "Allow"
+          Action = [
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:DeleteObject",
+            "s3:ListBucket",
+            "s3:GetBucketLocation",
+            "s3:GetBucketVersioning"
+          ]
+          Resource = concat(
+            length(var.mrap_iam.bucket_arns) > 0 ? flatten([
+              for bucket_arn in var.mrap_iam.bucket_arns : [
+                bucket_arn,
+                "${bucket_arn}/*"
+              ]
+              ]) : var.mrap_name != null && length(var.mrap_regions) > 0 ? flatten([
+              for region in var.mrap_regions : [
+                region.bucket_arn,
+                "${region.bucket_arn}/*"
+              ]
+            ]) : []
+          )
+        }
+      ],
+      var.mrap_iam.additional_policy_statements
+    )
+  })
+
+  tags = local.applied_tags
 }
+
+resource "aws_iam_role_policy_attachment" "mrap" {
+  count      = var.mrap_iam != null ? 1 : 0
+  role       = aws_iam_role.mrap[0].name
+  policy_arn = aws_iam_policy.mrap[0].arn
+}
+
