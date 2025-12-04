@@ -505,3 +505,40 @@ resource "aws_iam_role_policy_attachment" "mrap" {
   policy_arn = aws_iam_policy.mrap[0].arn
 }
 
+# -------------------------
+# Traffic dial resource for MRAP active-passive setup 
+data "aws_caller_identity" "current" {}
+
+resource "null_resource" "mrap_traffic_dial" {
+  count = var.mrap_name != null && length(var.mrap_regions) > 0 && var.mrap_traffic_dial != null ? 1 : 0
+
+  triggers = {
+    mrap_arn        = aws_s3control_multi_region_access_point.this[0].arn
+    primary_bucket  = var.mrap_primary_bucket_name
+    primary_dial    = coalesce(var.mrap_traffic_dial.primary_percentage, 100)
+    dr_bucket       = var.mrap_dr_bucket_name
+    dr_dial         = coalesce(var.mrap_traffic_dial.dr_percentage, 0)
+    account_id      = data.aws_caller_identity.current.account_id
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      ACCOUNT_ID="${self.triggers.account_id}"
+      MRAP_ARN="${self.triggers.mrap_arn}"
+
+      echo "Setting MRAP traffic: Primary=${self.triggers.primary_dial}%, DR=${self.triggers.dr_dial}%"
+
+      aws s3control submit-multi-region-access-point-routes \
+        --account-id "$ACCOUNT_ID" \
+        --mrap "$MRAP_ARN" \
+        --route-updates "Bucket=${self.triggers.primary_bucket},TrafficDialPercentage=${self.triggers.primary_dial}" \
+                         "Bucket=${self.triggers.dr_bucket},TrafficDialPercentage=${self.triggers.dr_dial}" \
+        --region ${var.mrap_control_plane_region}
+
+      echo "✓ Traffic dial updated successfully"
+    EOT
+    interpreter = ["bash", "-c"]
+  }
+
+  depends_on = [aws_s3control_multi_region_access_point.this]
+}
