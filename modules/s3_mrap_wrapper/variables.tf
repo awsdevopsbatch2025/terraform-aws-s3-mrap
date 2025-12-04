@@ -1,3 +1,22 @@
+variable "acl" {
+  description = "Canned ACL to apply to both primary and DR buckets."
+  type        = string
+  default     = "private"
+}
+
+variable "private" {
+  description = "Whether to block all public access on both buckets."
+  type        = bool
+  default     = true
+}
+
+variable "policy" {
+  description = "Optional bucket policy to apply to both primary and DR buckets."
+  type        = string
+  default     = ""
+}
+
+
 variable "base_name" {
 description = "Logical base name of the bucket (primary will use this, DR will add -dr)."
 type = string
