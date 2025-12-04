@@ -29,8 +29,8 @@ module "v3_bucket_pair" {
   # Adjust these to match how your existing primary is supposed to be configured.
 
   # Example 1: both buckets fully private, block public access:
-  acl     = "private"
-  private = true
+  acl     = "private" # use public-read for public
+  private = true # use false for public access
   policy  = ""          # or file("bucket-policy.json") if you want a policy
 
   # Example 2 (if you ever want public buckets):
