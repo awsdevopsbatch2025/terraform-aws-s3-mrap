@@ -19,6 +19,10 @@ context = var.context
 name = local.primary_name
 object_versioning_status = "Enabled"
 
+acl     = var.acl
+private = var.private
+policy  = var.policy
+
 replication_configuration = var.enable_bi_directional_crr ? {
 iam_role_arn = module.dr_bucket.replication_iam_role_arn
 rules = [
@@ -51,6 +55,10 @@ aws = aws.dr
 context = var.context
 name = local.dr_name
 object_versioning_status = "Enabled"
+
+acl     = var.acl
+private = var.private
+policy  = var.policy
 
 replication_configuration = var.enable_bi_directional_crr ? {
 rules = [
