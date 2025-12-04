@@ -27,3 +27,14 @@ output "mrap_alias" {
 description = "MRAP alias/URL (hostname) if MRAP is enabled."
 value = var.enable_mrap ? module.dr_bucket.mrap_alias : null
 }
+
+output "mrap_arn" {
+  description = "ARN of the Multi-Region Access Point."
+  value       = var.enable_mrap ? module.dr_bucket.mrap_arn : null
+}
+
+output "mrap_name" {
+  description = "Name of the Multi-Region Access Point."
+  value       = var.enable_mrap ? module.dr_bucket.mrap_name : null
+}
+
